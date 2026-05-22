@@ -180,7 +180,7 @@ function ShareProfile({ handle }: { handle: string }) {
           embeddable badge
         </summary>
         <div className="mt-2 bg-background border border-border rounded-md p-3 font-mono text-xs break-all">
-          {`<a href="${url}"><img src="https://kanorails.vercel.app/badge/${handle}.svg" /></a>`}
+          {`<a href="${url}"><img src="https://kanorails.vercel.app/badge/${handle}" alt="Kano Rails reputation" /></a>`}
         </div>
       </details>
     </Card>
@@ -311,7 +311,7 @@ function ChideraProfile() {
       <Card>
         <CardLabel>Embeddable badge</CardLabel>
         <div className="mt-3 bg-background border border-border rounded-md p-3 font-mono text-xs">
-          {`<a href="https://kanorails.vercel.app/p/${p.handle}"><img src="https://kanorails.vercel.app/badge/${p.handle}.svg" /></a>`}
+          {`<a href="https://kanorails.vercel.app/p/${p.handle}"><img src="https://kanorails.vercel.app/badge/${p.handle}" alt="Kano Rails reputation" /></a>`}
         </div>
       </Card>
 

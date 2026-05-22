@@ -3,15 +3,20 @@
 import { use, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  useConnectWallet,
   useCurrentAccount,
+  useCurrentWallet,
   useSuiClient,
+  useWallets,
 } from "@mysten/dapp-kit";
+import { isGoogleWallet, isEnokiWallet } from "@mysten/enoki";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardLabel } from "@/components/Card";
 import { TierBadge } from "@/components/TierBadge";
 import { WalletButton } from "@/components/WalletButton";
 import { CHIDERA, TIER_CONFIG } from "@/lib/mock-data";
 import { useExecuteTx, useSponsoredExecuteTx } from "@/lib/use-execute-tx";
+import { isEnokiWired } from "@/lib/enoki";
 import {
   buildAttestTx,
   buildDripUsdcTx,
@@ -27,8 +32,7 @@ import {
 } from "@/lib/sui";
 import { formatUSD, truncate } from "@/lib/utils";
 
-type PayMethod = "sui-wallet" | "cross-chain" | "zklogin-card";
-type ZkStep = "google" | "provisioning" | "card" | "submitting";
+type PayMethod = "sui-wallet" | "cross-chain" | "zklogin-google";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
 const FADE_UP = {
@@ -104,43 +108,11 @@ export default function PaymentLink({
     "none",
   );
 
-  const [zkStep, setZkStep] = useState<ZkStep>("google");
-  const [provisionedAddress, setProvisionedAddress] = useState<string | null>(
-    null,
-  );
   const [crossChainSource, setCrossChainSource] = useState<string | null>(null);
-  const [card, setCard] = useState({ number: "", exp: "", cvc: "" });
-
-  useEffect(() => {
-    if (zkStep === "provisioning") {
-      const t = setTimeout(() => {
-        setProvisionedAddress(
-          `0x${Math.random().toString(16).slice(2, 10)}…${Math.random().toString(16).slice(2, 6)}`,
-        );
-        setZkStep("card");
-      }, 1400);
-      return () => clearTimeout(t);
-    }
-    if (zkStep === "submitting") {
-      // zkLogin path is still mocked
-      const t = setTimeout(
-        () =>
-          setPaid({
-            digest: `0x${Math.random().toString(16).slice(2, 18)}`,
-            sponsored: true,
-          }),
-        1600,
-      );
-      return () => clearTimeout(t);
-    }
-  }, [zkStep]);
 
   const reset = () => {
     setMethod(null);
-    setZkStep("google");
-    setProvisionedAddress(null);
     setCrossChainSource(null);
-    setCard({ number: "", exp: "", cvc: "" });
     setPayError(null);
     setSubmitting(false);
   };
@@ -310,24 +282,29 @@ export default function PaymentLink({
             ) : !method ? (
               <motion.div key="picker" {...FADE_UP} className="space-y-2">
                 <PayButton
+                  label="Sign in with Google · no wallet needed"
+                  sub={
+                    isEnokiWired()
+                      ? "zkLogin provisions a Sui address from your Google account"
+                      : "Enoki not configured · demo only"
+                  }
+                  highlight
+                  onClick={() => setMethod("zklogin-google")}
+                />
+                <PayButton
                   label="Pay with Sui wallet"
                   sub={
                     onChainPayment
                       ? "Real on-chain payment · signs in your wallet"
                       : "You already have one connected"
                   }
-                  highlight
                   onClick={() => setMethod("sui-wallet")}
                 />
                 <PayButton
                   label="Pay with USDC on Ethereum / Base"
-                  sub="We'll route it to Sui · one signature"
+                  sub="V2 · Wormhole / LayerZero routing"
+                  badge="V2"
                   onClick={() => setMethod("cross-chain")}
-                />
-                <PayButton
-                  label="Pay with card"
-                  sub="Sign in with Google · no wallet needed"
-                  onClick={() => setMethod("zklogin-card")}
                 />
               </motion.div>
             ) : method === "sui-wallet" ? (
@@ -365,15 +342,22 @@ export default function PaymentLink({
                 onBack={reset}
               />
             ) : (
-              <ZkLoginPanel
-                key="zk"
-                step={zkStep}
-                provisionedAddress={provisionedAddress}
+              <GooglePanel
+                key="google"
                 amount={amount}
-                card={card}
-                onCardChange={setCard}
-                onGoogle={() => setZkStep("provisioning")}
-                onSubmit={() => setZkStep("submitting")}
+                onChainReady={!!onChainPayment && !!recipientRep}
+                usdcBalance={usdcBalance}
+                usdcCoins={usdcCoins}
+                submitting={submitting}
+                error={payError}
+                onPayOnChain={payOnChain}
+                onPayMock={() =>
+                  setPaid({
+                    digest: `0x${Math.random().toString(16).slice(2, 18)}`,
+                    sponsored: true,
+                  })
+                }
+                onDripUsdc={isUsdcFaucetWired() ? dripUsdc : undefined}
                 onBack={reset}
               />
             )}
@@ -442,11 +426,13 @@ function PayButton({
   sub,
   onClick,
   highlight,
+  badge,
 }: {
   label: string;
   sub: string;
   onClick: () => void;
   highlight?: boolean;
+  badge?: string;
 }) {
   return (
     <button
@@ -465,11 +451,15 @@ function PayButton({
         {label}
       </div>
       <div className="text-xs text-muted mt-0.5">{sub}</div>
-      {highlight && (
-        <div className="absolute top-3 right-3 text-[10px] font-mono uppercase tracking-wider text-signal/70">
-          recommended
-        </div>
-      )}
+      <div className="absolute top-3 right-3 text-[10px] font-mono uppercase tracking-wider">
+        {highlight ? (
+          <span className="text-signal/70">recommended</span>
+        ) : badge ? (
+          <span className="text-warn/80 px-1.5 py-0.5 rounded-full bg-warn/10 border border-warn/30">
+            {badge}
+          </span>
+        ) : null}
+      </div>
     </button>
   );
 }
@@ -657,231 +647,160 @@ function Row({
   );
 }
 
-function ZkLoginPanel({
-  step,
-  provisionedAddress,
+function GooglePanel({
   amount,
-  card,
-  onCardChange,
-  onGoogle,
-  onSubmit,
+  onChainReady,
+  usdcBalance,
+  usdcCoins,
+  submitting,
+  error,
+  onPayOnChain,
+  onPayMock,
+  onDripUsdc,
   onBack,
 }: {
-  step: ZkStep;
-  provisionedAddress: string | null;
   amount: number;
-  card: { number: string; exp: string; cvc: string };
-  onCardChange: (c: { number: string; exp: string; cvc: string }) => void;
-  onGoogle: () => void;
-  onSubmit: () => void;
+  onChainReady: boolean;
+  usdcBalance: bigint;
+  usdcCoins: Array<{ coinObjectId: string; balance: bigint }>;
+  submitting: boolean;
+  error: string | null;
+  onPayOnChain: (sourceCoinId: string) => void;
+  onPayMock: () => void;
+  onDripUsdc?: () => void;
   onBack: () => void;
 }) {
+  const wallets = useWallets();
+  const currentWallet = useCurrentWallet();
+  const account = useCurrentAccount();
+  const { mutate: connect, isPending: connecting } = useConnectWallet();
+
+  const googleWallet = wallets.find((w) =>
+    isEnokiWallet(w) && isGoogleWallet(w),
+  );
+  const connectedViaEnoki =
+    currentWallet.currentWallet &&
+    isEnokiWallet(currentWallet.currentWallet);
+
+  const wired = isEnokiWired();
+
+  if (!wired) {
+    return (
+      <motion.div {...FADE_UP} className="space-y-3">
+        <div className="rounded-md border border-warn/30 bg-warn/5 p-4 text-sm">
+          <div className="font-medium text-warn">zkLogin not configured</div>
+          <div className="mt-1 text-muted text-xs">
+            Set <span className="font-mono">NEXT_PUBLIC_ENOKI_API_KEY</span> +{" "}
+            <span className="font-mono">NEXT_PUBLIC_GOOGLE_CLIENT_ID</span> in
+            your Vercel env. Running mock payment for the demo.
+          </div>
+        </div>
+        <PrimaryButton onClick={onPayMock}>
+          Run demo payment of {formatUSD(amount)}
+        </PrimaryButton>
+        <BackButton onClick={onBack} />
+      </motion.div>
+    );
+  }
+
+  // Step 1: not connected via Enoki yet — show Google sign-in
+  if (!account || !connectedViaEnoki) {
+    return (
+      <motion.div {...FADE_UP} className="space-y-3">
+        <button
+          onClick={() => googleWallet && connect({ wallet: googleWallet })}
+          disabled={!googleWallet || connecting}
+          className="w-full flex items-center justify-center gap-3 bg-foreground text-background rounded-md py-3 font-medium text-sm hover:opacity-90 transition disabled:opacity-60"
+        >
+          <svg className="size-4" viewBox="0 0 48 48">
+            <path
+              fill="#FFC107"
+              d="M43.6 20.5H42V20H24v8h11.3c-1.6 4.7-6.1 8-11.3 8-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3l5.7-5.7C34.6 6.1 29.6 4 24 4 13 4 4 13 4 24s9 20 20 20 20-9 20-20c0-1.3-.1-2.4-.4-3.5z"
+            />
+            <path
+              fill="#FF3D00"
+              d="M6.3 14.7l6.6 4.8C14.7 16 19 13 24 13c3.1 0 5.9 1.2 8 3l5.7-5.7C34.6 6.1 29.6 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"
+            />
+            <path
+              fill="#4CAF50"
+              d="M24 44c5.5 0 10.4-2.1 14-5.5l-6.5-5.5c-2 1.4-4.6 2.3-7.5 2.3-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.6 39.6 16.2 44 24 44z"
+            />
+            <path
+              fill="#1976D2"
+              d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.2 4.3-4 5.7l6.5 5.5c-.5.4 7-5.1 7-15.2 0-1.3-.1-2.4-.4-3.5z"
+            />
+          </svg>
+          {connecting ? "Opening Google…" : "Continue with Google"}
+        </button>
+        <div className="text-[11px] text-muted text-center leading-relaxed">
+          Enoki provisions a Sui address from your Google sign-in via{" "}
+          <span className="font-mono">zkLogin</span>. No wallet to install. No
+          seed phrase. {account && "Currently connected via a different wallet — disconnect first to switch to Google."}
+        </div>
+        <BackButton onClick={onBack} />
+      </motion.div>
+    );
+  }
+
+  // Step 2: connected via Enoki — show pay-from-provisioned-address flow.
+  // This reuses SuiWalletPanel's logic structure for USDC balance + drip + sign.
+  const requiredUsdc = BigInt(amount * 10000); // amount in cents → USDC (6 decimals)
+  const hasEnoughUsdc = usdcBalance >= requiredUsdc;
+  const sourceCoin = usdcCoins.find((c) => c.balance >= requiredUsdc);
+
   return (
     <motion.div {...FADE_UP} className="space-y-3">
-      <div className="flex items-center justify-center gap-2 text-[10px] font-mono uppercase tracking-wider">
-        <StepDot active={step === "google"} done={step !== "google"}>
-          1 sign in
-        </StepDot>
-        <Connector done={step !== "google"} />
-        <StepDot
-          active={step === "provisioning" || step === "card"}
-          done={step === "submitting"}
-        >
-          2 provision
-        </StepDot>
-        <Connector done={step === "submitting"} />
-        <StepDot active={step === "submitting"} done={false}>
-          3 pay
-        </StepDot>
+      <div className="border border-success/30 bg-success/5 rounded-lg p-3 flex items-center justify-between gap-2 text-xs">
+        <div className="flex items-center gap-2">
+          <span className="size-1.5 rounded-full bg-success" />
+          <span className="text-success font-medium">
+            Sui address provisioned via Google
+          </span>
+        </div>
+        <span className="text-muted font-mono">
+          {truncate(account.address)}
+        </span>
       </div>
 
-      <AnimatePresence mode="wait">
-        {step === "google" && (
-          <motion.div key="google" {...FADE_UP} className="space-y-3">
-            <button
-              onClick={onGoogle}
-              className="w-full flex items-center justify-center gap-3 bg-foreground text-background rounded-md py-3 font-medium text-sm hover:opacity-90 transition"
-            >
-              <svg className="size-4" viewBox="0 0 48 48">
-                <path
-                  fill="#FFC107"
-                  d="M43.6 20.5H42V20H24v8h11.3c-1.6 4.7-6.1 8-11.3 8-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3l5.7-5.7C34.6 6.1 29.6 4 24 4 13 4 4 13 4 24s9 20 20 20 20-9 20-20c0-1.3-.1-2.4-.4-3.5z"
-                />
-                <path
-                  fill="#FF3D00"
-                  d="M6.3 14.7l6.6 4.8C14.7 16 19 13 24 13c3.1 0 5.9 1.2 8 3l5.7-5.7C34.6 6.1 29.6 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"
-                />
-                <path
-                  fill="#4CAF50"
-                  d="M24 44c5.5 0 10.4-2.1 14-5.5l-6.5-5.5c-2 1.4-4.6 2.3-7.5 2.3-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.6 39.6 16.2 44 24 44z"
-                />
-                <path
-                  fill="#1976D2"
-                  d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.2 4.3-4 5.7l6.5 5.5c-.5.4 7-5.1 7-15.2 0-1.3-.1-2.4-.4-3.5z"
-                />
-              </svg>
-              Continue with Google
-            </button>
-            <div className="text-[11px] text-muted text-center leading-relaxed">
-              We&apos;ll provision a Sui address from your Google sign-in via{" "}
-              <span className="font-mono">zkLogin</span>. No wallet to install.
-              No seed phrase.
-            </div>
-          </motion.div>
-        )}
-
-        {step === "provisioning" && (
-          <motion.div
-            key="prov"
-            {...FADE_UP}
-            className="py-4 text-center space-y-3"
-          >
-            <div className="inline-flex items-center gap-2 text-xs font-mono text-muted">
-              <span className="size-2 rounded-full bg-signal animate-pulse" />
-              chidera@gmail.com
-            </div>
-            <div className="text-sm text-foreground">
-              Provisioning your Sui address…
-            </div>
-            <div className="flex justify-center gap-1">
-              {[0, 1, 2].map((i) => (
-                <motion.span
-                  key={i}
-                  className="size-1.5 rounded-full bg-signal"
-                  animate={{ opacity: [0.2, 1, 0.2] }}
-                  transition={{
-                    duration: 1.1,
-                    repeat: Infinity,
-                    delay: i * 0.15,
-                  }}
-                />
-              ))}
-            </div>
-          </motion.div>
-        )}
-
-        {step === "card" && provisionedAddress && (
-          <motion.div key="card" {...FADE_UP} className="space-y-3">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              transition={{ duration: 0.4, ease: EASE }}
-              className="flex items-center justify-between rounded-md bg-success/5 border border-success/30 px-3 py-2 text-xs"
-            >
-              <div className="flex items-center gap-2">
-                <span className="size-1.5 rounded-full bg-success" />
-                <span className="text-success">Sui address provisioned</span>
-              </div>
-              <span className="text-muted font-mono">
-                {provisionedAddress}
-              </span>
-            </motion.div>
-
-            <div className="space-y-2">
-              <CardLabel>Card details</CardLabel>
-              <input
-                inputMode="numeric"
-                placeholder="1234 1234 1234 1234"
-                value={card.number}
-                onChange={(e) =>
-                  onCardChange({ ...card, number: e.target.value })
-                }
-                className="w-full bg-background border border-border rounded-md px-3 py-2.5 text-sm font-mono focus:border-signal outline-none"
-              />
-              <div className="grid grid-cols-2 gap-2">
-                <input
-                  inputMode="numeric"
-                  placeholder="MM / YY"
-                  value={card.exp}
-                  onChange={(e) =>
-                    onCardChange({ ...card, exp: e.target.value })
-                  }
-                  className="w-full bg-background border border-border rounded-md px-3 py-2.5 text-sm font-mono focus:border-signal outline-none"
-                />
-                <input
-                  inputMode="numeric"
-                  placeholder="CVC"
-                  value={card.cvc}
-                  onChange={(e) =>
-                    onCardChange({ ...card, cvc: e.target.value })
-                  }
-                  className="w-full bg-background border border-border rounded-md px-3 py-2.5 text-sm font-mono focus:border-signal outline-none"
-                />
-              </div>
-            </div>
-
-            <PrimaryButton onClick={onSubmit}>
-              Pay {formatUSD(amount)}
+      {!onChainReady ? (
+        <>
+          <div className="text-xs text-muted text-center">
+            This payment isn&apos;t a real on-chain object — running demo mode.
+          </div>
+          <PrimaryButton onClick={onPayMock}>
+            Pay {formatUSD(amount)}
+          </PrimaryButton>
+        </>
+      ) : !hasEnoughUsdc ? (
+        <>
+          <div className="text-xs text-warn text-center">
+            You need {(Number(requiredUsdc) / 1_000_000).toFixed(2)} test USDC.
+            Kano pays your gas.
+          </div>
+          {onDripUsdc && (
+            <PrimaryButton onClick={onDripUsdc}>
+              {submitting
+                ? "Minting…"
+                : "Get 1,000 test USDC (free, sponsored)"}
             </PrimaryButton>
-          </motion.div>
-        )}
+          )}
+        </>
+      ) : (
+        <PrimaryButton
+          onClick={() => sourceCoin && onPayOnChain(sourceCoin.coinObjectId)}
+        >
+          {submitting ? "Sign once — Kano pays the gas" : `Pay ${formatUSD(amount)} (gas sponsored)`}
+        </PrimaryButton>
+      )}
 
-        {step === "submitting" && (
-          <motion.div
-            key="sub"
-            {...FADE_UP}
-            className="py-4 text-center space-y-3"
-          >
-            <div className="text-sm text-foreground">Settling on Sui…</div>
-            <div className="flex justify-center gap-1">
-              {[0, 1, 2].map((i) => (
-                <motion.span
-                  key={i}
-                  className="size-1.5 rounded-full bg-success"
-                  animate={{ opacity: [0.2, 1, 0.2] }}
-                  transition={{
-                    duration: 0.9,
-                    repeat: Infinity,
-                    delay: i * 0.12,
-                  }}
-                />
-              ))}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {error && (
+        <div className="text-xs text-danger font-mono break-all p-2 rounded-md bg-danger/5 border border-danger/30">
+          {error}
+        </div>
+      )}
 
-      {step === "google" && <BackButton onClick={onBack} />}
+      <BackButton onClick={onBack} />
     </motion.div>
-  );
-}
-
-function StepDot({
-  active,
-  done,
-  children,
-}: {
-  active: boolean;
-  done: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <span
-      className={`flex items-center gap-1 ${
-        done
-          ? "text-success"
-          : active
-            ? "text-signal"
-            : "text-muted/60"
-      }`}
-    >
-      <span
-        className={`size-1.5 rounded-full ${
-          done
-            ? "bg-success"
-            : active
-              ? "bg-signal animate-pulse"
-              : "bg-muted/40"
-        }`}
-      />
-      {children}
-    </span>
-  );
-}
-
-function Connector({ done }: { done: boolean }) {
-  return (
-    <span className={`h-px w-4 ${done ? "bg-success" : "bg-border"}`} />
   );
 }
 
