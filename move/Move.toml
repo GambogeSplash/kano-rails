@@ -1,0 +1,12 @@
+[package]
+name = "kano_rails"
+version = "0.1.0"
+edition = "2024.beta"
+license = "MIT"
+authors = ["Kano Rails"]
+
+[dependencies]
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "mainnet-v1.39.3" }
+
+[addresses]
+kano_rails = "0x0"
