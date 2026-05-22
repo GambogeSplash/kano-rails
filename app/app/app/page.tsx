@@ -175,21 +175,12 @@ export default function Dashboard() {
       <section>
         <div className="flex items-end justify-between mb-3">
           <h2 className="text-lg font-medium">Recent payments</h2>
-          {live ? (
-            <Link
-              href={`/p/${truncate(displayAddress, 8, 0).replace("…", "")}`}
-              className="text-xs text-muted hover:text-foreground font-mono"
-            >
-              view public profile →
-            </Link>
-          ) : (
-            <Link
-              href="/p/chidera"
-              className="text-xs text-muted hover:text-foreground font-mono"
-            >
-              view public profile →
-            </Link>
-          )}
+          <Link
+          href={live ? `/p/${displayAddress}` : "/p/chidera"}
+          className="text-xs text-muted hover:text-foreground font-mono"
+        >
+          view public profile →
+        </Link>
         </div>
         {live ? (
           completedPayments === 0 ? (
