@@ -11,7 +11,7 @@ import { Card, CardLabel } from "@/components/Card";
 import { TierBadge } from "@/components/TierBadge";
 import { WalletButton } from "@/components/WalletButton";
 import { CHIDERA, TIER_CONFIG } from "@/lib/mock-data";
-import { useExecuteTx } from "@/lib/use-execute-tx";
+import { useExecuteTx, useSponsoredExecuteTx } from "@/lib/use-execute-tx";
 import {
   buildAttestTx,
   buildDripUsdcTx,
@@ -21,8 +21,8 @@ import {
   fetchUsdcCoins,
   isChainWired,
   isUsdcFaucetWired,
+  KANO_PACKAGE_ID,
   TIER_NAMES,
-  type OnChainPayment,
   type OnChainReputation,
 } from "@/lib/sui";
 import { formatUSD, truncate } from "@/lib/utils";
@@ -48,6 +48,8 @@ export default function PaymentLink({
   const client = useSuiClient();
   const queryClient = useQueryClient();
   const { mutate: executeTx } = useExecuteTx();
+  const { sponsored: sponsoredExec, enabled: sponsorshipAvailable } =
+    useSponsoredExecuteTx();
   const chainWired = isChainWired();
 
   // Try to load real PaymentObject; fall back to mock display.
@@ -95,7 +97,7 @@ export default function PaymentLink({
   const tier = TIER_CONFIG[tierName];
 
   const [method, setMethod] = useState<PayMethod | null>(null);
-  const [paid, setPaid] = useState<{ digest: string } | null>(null);
+  const [paid, setPaid] = useState<{ digest: string; sponsored: boolean } | null>(null);
   const [payError, setPayError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [attestation, setAttestation] = useState<"none" | "signing" | "given">(
@@ -125,6 +127,7 @@ export default function PaymentLink({
         () =>
           setPaid({
             digest: `0x${Math.random().toString(16).slice(2, 18)}`,
+            sponsored: true,
           }),
         1600,
       );
@@ -142,8 +145,10 @@ export default function PaymentLink({
     setSubmitting(false);
   };
 
-  // Real on-chain pay (Sui-wallet path)
-  const payOnChain = (sourceCoinId: string) => {
+  // Real on-chain pay (Sui-wallet path). Uses Enoki sponsorship for
+  // Silver/Gold tier payments when both Enoki is wired and the payment
+  // object's gas_sponsored flag is true.
+  const payOnChain = async (sourceCoinId: string) => {
     if (!onChainPayment || !recipientRep) return;
     setSubmitting(true);
     setPayError(null);
@@ -153,17 +158,40 @@ export default function PaymentLink({
       sourceUsdcCoinId: sourceCoinId,
       amountUsdcCents: BigInt(onChainPayment.amountUsdcCents),
     });
+
+    const useSponsor =
+      sponsorshipAvailable && onChainPayment.gasSponsored;
+
+    const invalidate = () => {
+      queryClient.invalidateQueries({ queryKey: ["kano-payment", id] });
+      queryClient.invalidateQueries({ queryKey: ["kano-rep-by-owner"] });
+      queryClient.invalidateQueries({ queryKey: ["kano-usdc-coins"] });
+    };
+
+    if (useSponsor) {
+      try {
+        const result = await sponsoredExec(tx, [
+          `${KANO_PACKAGE_ID}::payment::pay`,
+        ]);
+        setSubmitting(false);
+        setPaid({ digest: result.digest, sponsored: true });
+        invalidate();
+      } catch (err) {
+        setSubmitting(false);
+        setPayError(
+          err instanceof Error ? err.message : "Sponsored sign failed",
+        );
+      }
+      return;
+    }
+
     executeTx(
       { transaction: tx },
       {
         onSuccess: (result) => {
           setSubmitting(false);
-          setPaid({ digest: result.digest });
-          queryClient.invalidateQueries({ queryKey: ["kano-payment", id] });
-          queryClient.invalidateQueries({
-            queryKey: ["kano-rep-by-owner"],
-          });
-          queryClient.invalidateQueries({ queryKey: ["kano-usdc-coins"] });
+          setPaid({ digest: result.digest, sponsored: false });
+          invalidate();
         },
         onError: (err) => {
           setSubmitting(false);
@@ -193,17 +221,26 @@ export default function PaymentLink({
     );
   };
 
-  // Real attestation
-  const attest = () => {
+  // Real attestation. Also sponsored for Silver/Gold so the client doesn't
+  // pay gas just to leave reputation feedback.
+  const attest = async () => {
     if (!onChainPayment || !recipientRep) return;
     setAttestation("signing");
+    const tx = buildAttestTx({
+      paymentObjectId: onChainPayment.objectId,
+      receiverReputationObjectId: recipientRep.objectId,
+    });
+    if (sponsorshipAvailable && onChainPayment.gasSponsored) {
+      try {
+        await sponsoredExec(tx, [`${KANO_PACKAGE_ID}::payment::attest`]);
+        setAttestation("given");
+      } catch {
+        setAttestation("none");
+      }
+      return;
+    }
     executeTx(
-      {
-        transaction: buildAttestTx({
-          paymentObjectId: onChainPayment.objectId,
-          receiverReputationObjectId: recipientRep.objectId,
-        }),
-      },
+      { transaction: tx },
       {
         onSuccess: () => setAttestation("given"),
         onError: () => setAttestation("none"),
@@ -257,6 +294,7 @@ export default function PaymentLink({
               <SuccessPanel
                 key="paid"
                 digest={paid.digest}
+                sponsored={paid.sponsored}
                 attestation={attestation}
                 canAttest={
                   !!onChainPayment &&
@@ -306,6 +344,7 @@ export default function PaymentLink({
                 onPayMock={() =>
                   setPaid({
                     digest: `0x${Math.random().toString(16).slice(2, 18)}`,
+                    sponsored: false,
                   })
                 }
                 onDripUsdc={isUsdcFaucetWired() ? dripUsdc : undefined}
@@ -320,6 +359,7 @@ export default function PaymentLink({
                 onPay={() =>
                   setPaid({
                     digest: `0x${Math.random().toString(16).slice(2, 18)}`,
+                    sponsored: true,
                   })
                 }
                 onBack={reset}
@@ -847,12 +887,14 @@ function Connector({ done }: { done: boolean }) {
 
 function SuccessPanel({
   digest,
+  sponsored,
   attestation,
   canAttest,
   onAttest,
   onReset,
 }: {
   digest: string;
+  sponsored: boolean;
   attestation: "none" | "signing" | "given";
   canAttest: boolean;
   onAttest: () => void;
@@ -886,6 +928,19 @@ function SuccessPanel({
         </svg>
       </motion.div>
       <div className="font-medium text-lg">Payment sent</div>
+      {sponsored && (
+        <motion.div
+          initial={{ opacity: 0, y: 4 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4, ease: EASE, delay: 0.6 }}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-signal-dim border border-signal/30 text-signal text-[10px] font-mono uppercase tracking-wider"
+        >
+          <svg className="size-2.5" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M11 21l9-13h-7l1-8L5 13h7l-1 8z" />
+          </svg>
+          Kano paid the gas
+        </motion.div>
+      )}
       <div className="space-y-1.5 text-xs font-mono text-muted">
         <a
           href={`https://suiscan.xyz/testnet/tx/${digest}`}
