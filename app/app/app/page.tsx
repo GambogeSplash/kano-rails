@@ -1,28 +1,87 @@
+"use client";
+
 import Link from "next/link";
+import { useCurrentAccount } from "@mysten/dapp-kit";
 import { Card, CardLabel, Stat } from "@/components/Card";
 import { TierBadge } from "@/components/TierBadge";
 import { SavingsHero } from "@/components/SavingsHero";
 import { ChainStatus } from "@/components/ChainStatus";
-import { CHIDERA, PROGRESS_TO_GOLD, TIER_CONFIG } from "@/lib/mock-data";
+import { WalletButton } from "@/components/WalletButton";
+import {
+  CHIDERA,
+  PROGRESS_TO_GOLD,
+  TIER_CONFIG,
+  type Tier,
+} from "@/lib/mock-data";
+import { useReputation } from "@/lib/use-reputation";
+import { TIER_NAMES } from "@/lib/sui";
 import { formatUSD, relativeTime, truncate } from "@/lib/utils";
 
 export default function Dashboard() {
-  const tier = TIER_CONFIG[CHIDERA.tier];
-  const nativeAttestations = CHIDERA.attestations.filter(
-    (a) => a.source === "native"
-  ).length;
+  const account = useCurrentAccount();
+  const { reputation, chainWired } = useReputation();
+
+  // Live mode: chain wired + wallet connected + has a ReputationObject.
+  const live = chainWired && account && reputation;
+
+  const tierName: Tier = live
+    ? TIER_NAMES[reputation.tier]
+    : CHIDERA.tier;
+  const tier = TIER_CONFIG[tierName];
+
+  const completedPayments = live
+    ? reputation.completedPayments
+    : CHIDERA.completedPayments;
+  const totalVolume = live
+    ? reputation.totalVolumeUsdcCents
+    : CHIDERA.totalVolumeUsdc;
+  const nativeAttestationCount = live
+    ? reputation.nativeAttestationCount
+    : CHIDERA.attestations.filter((a) => a.source === "native").length;
+  const lifetimeSaved = live
+    ? // Rough estimate: assume 10.4% P2P loss vs current tier's fee
+      Math.round(
+        reputation.totalVolumeUsdcCents *
+          ((10.4 - tier.feeBps / 100) / 100),
+      )
+    : CHIDERA.lifetimeSavedVsP2P;
+  const avgOfframp = live
+    ? parseInt(tier.offrampEtaMinutes.split("–")[0] || "10") || 10
+    : CHIDERA.averageOfframpMinutes;
+  const walletAge = live ? reputation.walletAgeDays : 142;
+  const displayAddress = live ? account.address : CHIDERA.address;
+  const displayName = live
+    ? `0x${account.address.slice(2, 6)}`
+    : CHIDERA.displayName.split(" ")[0];
+
   const goldProgress =
-    ((CHIDERA.completedPayments / 10) * 0.6 + (nativeAttestations / 4) * 0.4) *
+    ((completedPayments / 10) * 0.6 +
+      (nativeAttestationCount / 4) * 0.4) *
     100;
 
   return (
     <div className="space-y-8">
+      {!live && (
+        <DemoBanner
+          chainWired={chainWired}
+          connected={!!account}
+          hasRep={!!reputation}
+        />
+      )}
+
       <header className="flex items-end justify-between gap-4 flex-wrap">
         <div>
           <ChainStatus />
           <h1 className="text-3xl font-medium mt-2">
-            Welcome back, {CHIDERA.displayName.split(" ")[0]}
+            {live
+              ? `Welcome back, ${displayName}`
+              : `Welcome back, ${displayName}`}
           </h1>
+          {live && (
+            <div className="text-xs text-muted font-mono mt-1">
+              {truncate(displayAddress)} · wallet age {walletAge}d
+            </div>
+          )}
         </div>
         <Link
           href="/create"
@@ -33,9 +92,9 @@ export default function Dashboard() {
       </header>
 
       <SavingsHero
-        savedCents={CHIDERA.lifetimeSavedVsP2P}
-        paymentCount={CHIDERA.completedPayments}
-        avgOfframpMinutes={CHIDERA.averageOfframpMinutes}
+        savedCents={lifetimeSaved}
+        paymentCount={completedPayments}
+        avgOfframpMinutes={avgOfframp}
         feeBpsCurrent={tier.feeBps}
       />
 
@@ -44,27 +103,35 @@ export default function Dashboard() {
           <div>
             <CardLabel>Reputation</CardLabel>
             <div className="mt-2 flex items-center gap-3">
-              <TierBadge tier={CHIDERA.tier} size="lg" />
-              <span className="text-muted text-sm font-mono">
-                score {CHIDERA.weightedAttestationScore}
-              </span>
+              <TierBadge tier={tierName} size="lg" />
+              {live ? (
+                <span className="text-muted text-sm font-mono">
+                  score {reputation.weightedAttestationScore}
+                </span>
+              ) : (
+                <span className="text-muted text-sm font-mono">
+                  score {CHIDERA.weightedAttestationScore}
+                </span>
+              )}
             </div>
           </div>
           <div className="text-right text-xs text-muted font-mono">
-            <div>{PROGRESS_TO_GOLD.paymentsNeeded} payments → Gold</div>
             <div>
-              {PROGRESS_TO_GOLD.attestationsNeeded} native attestations → Gold
+              {Math.max(0, 10 - completedPayments)} payments → Gold
+            </div>
+            <div>
+              {Math.max(0, 4 - nativeAttestationCount)} native attestations → Gold
             </div>
           </div>
         </div>
         <div className="mt-4 h-1.5 rounded-full bg-background overflow-hidden">
           <div
-            className="h-full bg-tier-gold"
+            className="h-full bg-tier-gold transition-all duration-700"
             style={{ width: `${Math.min(100, goldProgress)}%` }}
           />
         </div>
         <div className="mt-2 flex justify-between text-xs text-muted font-mono">
-          <span>Silver</span>
+          <span>{tierName}</span>
           <span>{Math.round(goldProgress)}%</span>
           <span>Gold</span>
         </div>
@@ -74,22 +141,22 @@ export default function Dashboard() {
         <Card>
           <Stat
             label="Lifetime earned"
-            value={formatUSD(CHIDERA.totalVolumeUsdc)}
-            sub={`${CHIDERA.completedPayments} settled payments`}
+            value={formatUSD(totalVolume)}
+            sub={`${completedPayments} settled payments`}
           />
         </Card>
         <Card>
           <Stat
             label="Saved vs P2P"
-            value={formatUSD(CHIDERA.lifetimeSavedVsP2P)}
+            value={formatUSD(lifetimeSaved)}
             sub="estimated"
           />
         </Card>
         <Card>
           <Stat
             label="Avg offramp"
-            value={`${CHIDERA.averageOfframpMinutes} min`}
-            sub={`Silver: ${tier.offrampEtaMinutes} min queue`}
+            value={`${avgOfframp} min`}
+            sub={`${tierName}: ${tier.offrampEtaMinutes} min queue`}
           />
         </Card>
         <Card>
@@ -97,7 +164,9 @@ export default function Dashboard() {
             label="Current fee"
             value={`${(tier.feeBps / 100).toFixed(2)}%`}
             sub={
-              tier.clientGasSponsored ? "client gas sponsored" : "client pays gas"
+              tier.clientGasSponsored
+                ? "client gas sponsored"
+                : "client pays gas"
             }
           />
         </Card>
@@ -106,88 +175,176 @@ export default function Dashboard() {
       <section>
         <div className="flex items-end justify-between mb-3">
           <h2 className="text-lg font-medium">Recent payments</h2>
-          <Link
-            href="/p/chidera"
-            className="text-xs text-muted hover:text-foreground font-mono"
-          >
-            view public profile →
-          </Link>
+          {live ? (
+            <Link
+              href={`/p/${truncate(displayAddress, 8, 0).replace("…", "")}`}
+              className="text-xs text-muted hover:text-foreground font-mono"
+            >
+              view public profile →
+            </Link>
+          ) : (
+            <Link
+              href="/p/chidera"
+              className="text-xs text-muted hover:text-foreground font-mono"
+            >
+              view public profile →
+            </Link>
+          )}
         </div>
-        <Card className="p-0 overflow-hidden">
-          <table className="w-full text-sm">
-            <thead className="text-xs text-muted font-mono uppercase tracking-wider">
-              <tr className="border-b border-border">
-                <th className="text-left p-4 font-normal">Client</th>
-                <th className="text-left p-4 font-normal">Tier</th>
-                <th className="text-right p-4 font-normal">Amount</th>
-                <th className="text-right p-4 font-normal">Fee</th>
-                <th className="text-right p-4 font-normal">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {CHIDERA.payments.map((p) => (
-                <tr
-                  key={p.id}
-                  className="border-b border-border last:border-0 hover:bg-surface-2 transition"
-                >
-                  <td className="p-4 font-mono text-xs">{p.client}</td>
-                  <td className="p-4">
-                    <TierBadge tier={p.tier} />
-                  </td>
-                  <td className="p-4 text-right tabular-nums">
-                    {formatUSD(p.amountUsdc)}
-                  </td>
-                  <td className="p-4 text-right tabular-nums text-muted">
-                    {formatUSD((p.amountUsdc * p.feeBps) / 10000)}
-                  </td>
-                  <td className="p-4 text-right">
-                    {p.status === "pending" ? (
-                      <span className="text-warn font-mono text-xs">
-                        pending · {relativeTime(p.createdAt)}
-                      </span>
-                    ) : p.status === "disputed" ? (
-                      <span className="text-danger font-mono text-xs">
-                        disputed
-                      </span>
-                    ) : (
-                      <span className="text-success font-mono text-xs">
-                        settled ·{" "}
-                        {p.settledAt ? relativeTime(p.settledAt) : ""}
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </Card>
-      </section>
-
-      <section>
-        <h2 className="text-lg font-medium mb-3">Attestations</h2>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {CHIDERA.attestations.map((a, i) => (
-            <Card key={i} className="text-sm">
-              <div className="flex items-start justify-between">
-                <div>
-                  <div className="font-medium">{a.clientName}</div>
-                  <div className="text-xs text-muted font-mono mt-0.5">
-                    {a.clientDomain}
-                  </div>
-                </div>
-                <div className="text-xs font-mono text-muted">×{a.weight}</div>
+        {live ? (
+          completedPayments === 0 ? (
+            <Card className="text-center py-12">
+              <div className="text-muted text-sm">
+                No payments yet. Create your first one to start building
+                reputation.
               </div>
-              <div className="mt-3 text-xs text-muted">
-                {a.source === "native"
-                  ? "Native attestation"
-                  : `Imported · ${a.source.replace("imported-", "")}`}
-                {" · "}
-                {relativeTime(a.givenAt)}
+              <Link
+                href="/create"
+                className="inline-block mt-4 bg-signal text-background px-4 py-2 rounded-md text-sm font-medium"
+              >
+                Create payment request →
+              </Link>
+            </Card>
+          ) : (
+            <Card className="text-center py-8">
+              <div className="text-muted text-sm">
+                {completedPayments} settled payments on-chain. Per-payment
+                history will appear here once we wire event indexing.
+              </div>
+              <div className="mt-2 text-xs text-muted font-mono">
+                total volume {formatUSD(totalVolume)}
               </div>
             </Card>
-          ))}
-        </div>
+          )
+        ) : (
+          <Card className="p-0 overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="text-xs text-muted font-mono uppercase tracking-wider">
+                <tr className="border-b border-border">
+                  <th className="text-left p-4 font-normal">Client</th>
+                  <th className="text-left p-4 font-normal">Tier</th>
+                  <th className="text-right p-4 font-normal">Amount</th>
+                  <th className="text-right p-4 font-normal">Fee</th>
+                  <th className="text-right p-4 font-normal">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {CHIDERA.payments.map((p) => (
+                  <tr
+                    key={p.id}
+                    className="border-b border-border last:border-0 hover:bg-surface-2 transition"
+                  >
+                    <td className="p-4 font-mono text-xs">{p.client}</td>
+                    <td className="p-4">
+                      <TierBadge tier={p.tier} />
+                    </td>
+                    <td className="p-4 text-right tabular-nums">
+                      {formatUSD(p.amountUsdc)}
+                    </td>
+                    <td className="p-4 text-right tabular-nums text-muted">
+                      {formatUSD((p.amountUsdc * p.feeBps) / 10000)}
+                    </td>
+                    <td className="p-4 text-right">
+                      {p.status === "pending" ? (
+                        <span className="text-warn font-mono text-xs">
+                          pending · {relativeTime(p.createdAt)}
+                        </span>
+                      ) : p.status === "disputed" ? (
+                        <span className="text-danger font-mono text-xs">
+                          disputed
+                        </span>
+                      ) : (
+                        <span className="text-success font-mono text-xs">
+                          settled ·{" "}
+                          {p.settledAt ? relativeTime(p.settledAt) : ""}
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Card>
+        )}
       </section>
+
+      {!live && (
+        <section>
+          <h2 className="text-lg font-medium mb-3">Attestations</h2>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {CHIDERA.attestations.map((a, i) => (
+              <Card key={i} className="text-sm">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <div className="font-medium">{a.clientName}</div>
+                    <div className="text-xs text-muted font-mono mt-0.5">
+                      {a.clientDomain}
+                    </div>
+                  </div>
+                  <div className="text-xs font-mono text-muted">
+                    ×{a.weight}
+                  </div>
+                </div>
+                <div className="mt-3 text-xs text-muted">
+                  {a.source === "native"
+                    ? "Native attestation"
+                    : `Imported · ${a.source.replace("imported-", "")}`}
+                  {" · "}
+                  {relativeTime(a.givenAt)}
+                </div>
+              </Card>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* unused for live, keeps compiler happy with PROGRESS_TO_GOLD import */}
+      <span className="hidden">{PROGRESS_TO_GOLD.paymentsNeeded}</span>
     </div>
+  );
+}
+
+function DemoBanner({
+  chainWired,
+  connected,
+  hasRep,
+}: {
+  chainWired: boolean;
+  connected: boolean;
+  hasRep: boolean;
+}) {
+  let message: string;
+  let cta: React.ReactNode = null;
+
+  if (!chainWired) {
+    message =
+      "Demo data — Move package not configured. Set NEXT_PUBLIC_KANO_PACKAGE_ID to wire chain.";
+  } else if (!connected) {
+    message = "Demo data — connect a wallet to see your own reputation.";
+    cta = <WalletButton />;
+  } else if (!hasRep) {
+    message = "Demo data — you don't have a reputation object yet.";
+    cta = (
+      <Link
+        href="/onboarding"
+        className="bg-signal text-background px-3 py-1.5 rounded-md text-xs font-medium"
+      >
+        Mint reputation →
+      </Link>
+    );
+  } else {
+    return null;
+  }
+
+  return (
+    <Card className="border-warn/40 bg-warn/5 flex items-center justify-between gap-4 flex-wrap">
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-warn/15 text-warn">
+          Demo
+        </span>
+        <span className="text-sm">{message}</span>
+      </div>
+      {cta}
+    </Card>
   );
 }

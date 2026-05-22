@@ -66,6 +66,17 @@ export default function Offramp() {
         </p>
       </div>
 
+      <Card className="border-warn/40 bg-warn/5 flex items-center gap-3 text-sm">
+        <span className="text-[10px] uppercase tracking-wider font-mono px-2 py-0.5 rounded-full bg-warn/15 text-warn shrink-0">
+          Demo
+        </span>
+        <span className="text-muted">
+          Yellow Card / Busha integration is scaffolded but not live. Real
+          settlement requires a business account + KYC + bank verification —
+          off-platform partner work, not code.
+        </span>
+      </Card>
+
       <Card className="space-y-5">
         <label className="block">
           <CardLabel>Amount (USDC)</CardLabel>
