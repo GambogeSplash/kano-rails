@@ -98,6 +98,8 @@ export default function Dashboard() {
         feeBpsCurrent={tier.feeBps}
       />
 
+      <QuickActions live={!!live} address={displayAddress} />
+
       <Card>
         <div className="flex items-start justify-between">
           <div>
@@ -291,6 +293,91 @@ export default function Dashboard() {
 
       {/* unused for live, keeps compiler happy with PROGRESS_TO_GOLD import */}
       <span className="hidden">{PROGRESS_TO_GOLD.paymentsNeeded}</span>
+    </div>
+  );
+}
+
+function QuickActions({
+  live,
+  address,
+}: {
+  live: boolean;
+  address: string;
+}) {
+  const actions = [
+    {
+      href: "/create",
+      label: "New payment request",
+      sub: "Send a link to a client",
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M12 5v14M5 12h14" strokeLinecap="round" />
+        </svg>
+      ),
+      primary: true,
+    },
+    {
+      href: "/offramp",
+      label: "Withdraw to bank",
+      sub: "USDC → NGN via Yellow Card",
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M3 7h18M3 12h18M3 17h18" strokeLinecap="round" />
+        </svg>
+      ),
+    },
+    {
+      href: live ? `/p/${address}` : "/p/chidera",
+      label: "Share your profile",
+      sub: "Copy a public reputation link",
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M3 12h18M12 3a16 16 0 010 18M12 3a16 16 0 000 18" />
+        </svg>
+      ),
+    },
+    {
+      href: "/onboarding",
+      label: "Import attestations",
+      sub: "Add LinkedIn / GitHub / EVM",
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M12 3v12M7 10l5 5 5-5M5 21h14" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      ),
+    },
+  ];
+
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      {actions.map((a) => (
+        <Link
+          key={a.href + a.label}
+          href={a.href}
+          className={`group flex flex-col gap-1 rounded-xl border p-4 transition ${
+            a.primary
+              ? "border-signal/40 bg-signal-dim hover:bg-signal-dim/70"
+              : "border-border bg-surface hover:border-foreground/30"
+          }`}
+        >
+          <span
+            className={`size-8 rounded-md flex items-center justify-center ${
+              a.primary ? "bg-signal/20 text-signal" : "bg-surface-2 text-muted group-hover:text-foreground"
+            }`}
+          >
+            <span className="size-4">{a.icon}</span>
+          </span>
+          <span
+            className={`mt-2 text-sm font-medium ${
+              a.primary ? "text-signal" : "text-foreground"
+            }`}
+          >
+            {a.label}
+          </span>
+          <span className="text-xs text-muted leading-snug">{a.sub}</span>
+        </Link>
+      ))}
     </div>
   );
 }

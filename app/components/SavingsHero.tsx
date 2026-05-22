@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { motion } from "framer-motion";
 import { CountUp } from "@/components/CountUp";
 
@@ -53,6 +54,21 @@ export function SavingsHero({
             {Math.round((savedCents * 10.4) / (feeBpsCurrent / 100) / 100)} on
             P2P
           </div>
+          <Link
+            href="/offramp"
+            className="inline-flex items-center gap-1.5 mt-4 text-sm text-success hover:underline"
+          >
+            Withdraw to bank
+            <svg
+              className="size-3"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <path d="M5 12h14M13 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </Link>
         </div>
         <div className="flex gap-6 text-sm">
           <div>

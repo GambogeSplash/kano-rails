@@ -225,19 +225,25 @@ export default function CreateRequest() {
             </a>
           )}
           <div className="mt-3 text-sm">Share this link with your client:</div>
-          <div className="mt-2 bg-background border border-border rounded-md px-3 py-2 font-mono text-xs break-all">
-            https://kanorails.vercel.app/pay/{submit.paymentId}
-          </div>
-          <div className="mt-4 flex gap-3">
+          <ShareLinkRow
+            url={`https://kanorails.vercel.app/pay/${submit.paymentId}`}
+          />
+          <div className="mt-4 flex flex-wrap gap-2">
             <Link
               href={`/pay/${submit.paymentId}`}
               className="bg-signal text-background px-4 py-2 rounded-md text-sm font-medium"
             >
               Preview client view →
             </Link>
+            <Link
+              href="/app"
+              className="px-4 py-2 rounded-md border border-border text-sm text-muted hover:text-foreground hover:border-foreground/30"
+            >
+              Back to dashboard
+            </Link>
             <button
               onClick={() => setSubmit({ kind: "idle" })}
-              className="text-sm text-muted hover:text-foreground"
+              className="px-4 py-2 text-sm text-muted hover:text-foreground"
             >
               Create another
             </button>
@@ -320,6 +326,40 @@ function Row({
       >
         {value}
       </span>
+    </div>
+  );
+}
+
+function ShareLinkRow({ url }: { url: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* ignore */
+    }
+  };
+  return (
+    <div className="mt-2 flex items-center gap-2 bg-background border border-border rounded-md p-1 pl-3">
+      <div className="flex-1 font-mono text-xs break-all">{url}</div>
+      <button
+        onClick={copy}
+        className="shrink-0 px-3 py-1.5 rounded-md bg-surface-2 text-xs font-mono hover:bg-surface"
+      >
+        {copied ? "copied ✓" : "copy"}
+      </button>
+      <a
+        href={`https://twitter.com/intent/tweet?text=${encodeURIComponent(
+          "Pay me on Kano Rails — reputation-gated USDC payments on Sui · " + url,
+        )}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="shrink-0 px-3 py-1.5 rounded-md bg-surface-2 text-xs font-mono hover:bg-surface"
+      >
+        share
+      </a>
     </div>
   );
 }
