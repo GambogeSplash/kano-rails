@@ -2,87 +2,90 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useCurrentAccount } from "@mysten/dapp-kit";
 import { Card, CardLabel } from "@/components/Card";
 import { TierBadge } from "@/components/TierBadge";
+import { WalletButton } from "@/components/WalletButton";
 import { CHIDERA, TIER_CONFIG } from "@/lib/mock-data";
-import { formatUSD } from "@/lib/utils";
+import { useReputation } from "@/lib/use-reputation";
+import { useExecuteTx } from "@/lib/use-execute-tx";
 import {
   buildCreatePaymentTx,
+  extractCreatedPaymentObjectId,
   isChainWired,
   KANO_PACKAGE_ID,
+  USDC_TYPE,
 } from "@/lib/sui";
+import { formatUSD } from "@/lib/utils";
 
-interface GenerationResult {
-  id: string;
-  ptbPreview: string;
-  chainWired: boolean;
-}
+type SubmitState =
+  | { kind: "idle" }
+  | { kind: "signing" }
+  | { kind: "success"; paymentId: string; digest: string }
+  | { kind: "error"; message: string };
 
 export default function CreateRequest() {
   const [amount, setAmount] = useState("3000");
   const [client, setClient] = useState("berlin@startup.com");
   const [deadline, setDeadline] = useState("48");
-  const [generated, setGenerated] = useState<GenerationResult | null>(null);
+  const [submit, setSubmit] = useState<SubmitState>({ kind: "idle" });
 
-  const tier = TIER_CONFIG[CHIDERA.tier];
+  const account = useCurrentAccount();
+  const { reputation } = useReputation();
+  const chainWired = isChainWired();
+  const { mutate: doSignAndExecute } = useExecuteTx();
+
+  const onChainTier = reputation
+    ? reputation.tier === 2
+      ? "Gold"
+      : reputation.tier === 1
+        ? "Silver"
+        : "Bronze"
+    : CHIDERA.tier;
+  const tier = TIER_CONFIG[onChainTier];
+
   const amountCents = Math.round((parseFloat(amount) || 0) * 100);
   const feeCents = Math.round((amountCents * tier.feeBps) / 10000);
   const receiveCents = amountCents - feeCents;
 
-  const generate = () => {
-    const id = `pay_${Math.random().toString(36).slice(2, 6)}`;
-    const deadlineMs = BigInt(Date.now() + parseInt(deadline) * 3600 * 1000);
+  const canSubmitOnChain =
+    chainWired && account && reputation && submit.kind !== "signing";
 
-    let ptbPreview: string;
-    if (isChainWired()) {
-      try {
-        const tx = buildCreatePaymentTx({
-          reputationObjectId: CHIDERA.address,
-          amountUsdcCents: BigInt(amountCents),
-          deadlineMs,
-        });
-        // Show the move call payload (no sender/gas set yet, no signing).
-        ptbPreview = JSON.stringify(
-          {
-            target: `${KANO_PACKAGE_ID}::payment::create`,
-            type_args: [
-              process.env.NEXT_PUBLIC_USDC_TYPE ?? "0x0::usdc::USDC",
-            ],
-            args: [
-              { object: CHIDERA.address },
-              { u64: String(amountCents) },
-              { u64: String(deadlineMs) },
-              { object: "0x6 (clock)" },
-            ],
-            // Tag the SDK actually built a real Transaction object:
-            sdk_constructed: tx.constructor.name === "Transaction",
-          },
-          null,
-          2,
-        );
-      } catch (err) {
-        ptbPreview = `// Builder error: ${String(err)}`;
-      }
-    } else {
-      ptbPreview = JSON.stringify(
-        {
-          target: "<package_id>::payment::create",
-          type_args: ["<usdc_type>"],
-          args: [
-            { object: "<reputation_object_id>" },
-            { u64: String(amountCents) },
-            { u64: String(deadlineMs) },
-            { object: "0x6 (clock)" },
-          ],
-          // Will be a real PTB once NEXT_PUBLIC_KANO_PACKAGE_ID is set:
-          chain_wired: false,
-        },
-        null,
-        2,
-      );
+  const generate = () => {
+    if (!canSubmitOnChain || !reputation) {
+      // Demo-only path: fake id
+      const id = `pay_${Math.random().toString(36).slice(2, 6)}`;
+      setSubmit({ kind: "success", paymentId: id, digest: "" });
+      return;
     }
 
-    setGenerated({ id, ptbPreview, chainWired: isChainWired() });
+    setSubmit({ kind: "signing" });
+    const tx = buildCreatePaymentTx({
+      reputationObjectId: reputation.objectId,
+      amountUsdcCents: BigInt(amountCents),
+      deadlineMs: BigInt(Date.now() + parseInt(deadline) * 3600 * 1000),
+    });
+
+    doSignAndExecute(
+      { transaction: tx },
+      {
+        onSuccess: async (result) => {
+          const paymentId =
+            extractCreatedPaymentObjectId(result as never) ?? "unknown";
+          setSubmit({
+            kind: "success",
+            paymentId,
+            digest: result.digest,
+          });
+        },
+        onError: (err) => {
+          setSubmit({
+            kind: "error",
+            message: err.message ?? "Sign failed",
+          });
+        },
+      },
+    );
   };
 
   return (
@@ -99,6 +102,30 @@ export default function CreateRequest() {
           Tier locks at creation. Snapshot is immutable.
         </p>
       </div>
+
+      {chainWired && !account && (
+        <Card className="border-warn/40 bg-warn/5 flex items-center justify-between gap-3 flex-wrap">
+          <span className="text-sm">
+            Connect a wallet to create a real on-chain payment request.
+          </span>
+          <WalletButton />
+        </Card>
+      )}
+
+      {chainWired && account && !reputation && (
+        <Card className="border-warn/40 bg-warn/5 space-y-2">
+          <div className="text-sm font-medium">No reputation object yet</div>
+          <div className="text-xs text-muted">
+            Mint one before creating a request — your tier comes from it.
+          </div>
+          <Link
+            href="/onboarding"
+            className="inline-block text-xs text-signal hover:underline"
+          >
+            Go to onboarding →
+          </Link>
+        </Card>
+      )}
 
       <Card className="space-y-5">
         <label className="block">
@@ -144,10 +171,10 @@ export default function CreateRequest() {
       <Card className="bg-signal-dim border-signal/30">
         <div className="flex items-start justify-between">
           <CardLabel>Settlement preview</CardLabel>
-          <TierBadge tier={CHIDERA.tier} />
+          <TierBadge tier={onChainTier} />
         </div>
         <div className="mt-4 space-y-2 font-mono text-sm">
-          <Row label="Tier" value={CHIDERA.tier} />
+          <Row label="Tier" value={onChainTier} />
           <Row label="Fee rate" value={`${(tier.feeBps / 100).toFixed(2)}%`} />
           <Row
             label="Offramp priority"
@@ -156,9 +183,7 @@ export default function CreateRequest() {
           <Row
             label="Client gas"
             value={
-              tier.clientGasSponsored
-                ? "Sponsored by Kano"
-                : "Client pays"
+              tier.clientGasSponsored ? "Sponsored by Kano" : "Client pays"
             }
           />
           <hr className="border-border my-3" />
@@ -168,53 +193,103 @@ export default function CreateRequest() {
         </div>
       </Card>
 
-      {generated ? (
-        <>
-          <Card className="border-success/40 bg-success/5">
-            <CardLabel>Payment object created</CardLabel>
-            <div className="mt-2 font-mono text-sm break-all text-success">
-              {generated.id}
-            </div>
-            <div className="mt-3 text-sm">Share this link with your client:</div>
-            <div className="mt-2 bg-background border border-border rounded-md px-3 py-2 font-mono text-xs break-all">
-              https://kano.rails/pay/{generated.id}
-            </div>
-            <div className="mt-4 flex gap-3">
-              <Link
-                href={`/pay/${generated.id}`}
-                className="bg-signal text-background px-4 py-2 rounded-md text-sm font-medium"
+      {submit.kind === "success" ? (
+        <Card className="border-success/40 bg-success/5">
+          <CardLabel>
+            {submit.digest ? "Payment object created on Sui" : "Payment object created (demo)"}
+          </CardLabel>
+          <div className="mt-2 font-mono text-sm break-all text-success">
+            {submit.paymentId}
+          </div>
+          {submit.digest && (
+            <a
+              href={`https://suiscan.xyz/testnet/tx/${submit.digest}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 mt-2 text-xs font-mono text-signal hover:underline"
+            >
+              tx {submit.digest.slice(0, 10)}…{submit.digest.slice(-6)}
+              <svg
+                className="size-3"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
               >
-                Preview client view →
-              </Link>
-              <button
-                onClick={() => setGenerated(null)}
-                className="text-sm text-muted hover:text-foreground"
-              >
-                Create another
-              </button>
-            </div>
-          </Card>
-          <Card>
-            <div className="flex items-start justify-between">
-              <CardLabel>Programmable Transaction payload</CardLabel>
-              <span className="text-xs font-mono text-muted">
-                {generated.chainWired
-                  ? "built with @mysten/sui · ready to sign"
-                  : "preview · set NEXT_PUBLIC_KANO_PACKAGE_ID for live"}
-              </span>
-            </div>
-            <pre className="mt-3 bg-background border border-border rounded-md p-3 text-xs font-mono overflow-x-auto leading-relaxed">
-              {generated.ptbPreview}
-            </pre>
-          </Card>
-        </>
+                <path
+                  d="M7 17L17 7M9 7h8v8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </a>
+          )}
+          <div className="mt-3 text-sm">Share this link with your client:</div>
+          <div className="mt-2 bg-background border border-border rounded-md px-3 py-2 font-mono text-xs break-all">
+            https://kanorails.vercel.app/pay/{submit.paymentId}
+          </div>
+          <div className="mt-4 flex gap-3">
+            <Link
+              href={`/pay/${submit.paymentId}`}
+              className="bg-signal text-background px-4 py-2 rounded-md text-sm font-medium"
+            >
+              Preview client view →
+            </Link>
+            <button
+              onClick={() => setSubmit({ kind: "idle" })}
+              className="text-sm text-muted hover:text-foreground"
+            >
+              Create another
+            </button>
+          </div>
+        </Card>
+      ) : submit.kind === "error" ? (
+        <Card className="border-danger/40 bg-danger/5 space-y-3">
+          <div className="text-sm text-danger font-medium">Sign failed</div>
+          <div className="text-xs text-muted font-mono break-all">
+            {submit.message}
+          </div>
+          <button
+            onClick={generate}
+            className="w-full bg-signal text-background py-3 rounded-md font-medium"
+          >
+            Try again
+          </button>
+        </Card>
       ) : (
         <button
           onClick={generate}
-          className="w-full bg-signal text-background py-3 rounded-md font-medium hover:opacity-90 transition"
+          disabled={submit.kind === "signing"}
+          className="w-full bg-signal text-background py-3 rounded-md font-medium hover:opacity-90 transition disabled:opacity-60"
         >
-          Generate payment link
+          {submit.kind === "signing"
+            ? "Sign in your wallet…"
+            : canSubmitOnChain
+              ? "Sign & create payment object"
+              : "Generate payment link (demo)"}
         </button>
+      )}
+
+      {chainWired && (
+        <details className="text-xs text-muted">
+          <summary className="cursor-pointer">PTB payload</summary>
+          <pre className="mt-2 bg-surface border border-border rounded-md p-3 font-mono overflow-x-auto leading-relaxed">
+{JSON.stringify(
+  {
+    target: `${KANO_PACKAGE_ID}::payment::create`,
+    type_args: [USDC_TYPE],
+    args: [
+      { object: reputation?.objectId ?? "<your_reputation_object>" },
+      { u64: String(amountCents) },
+      { u64: "<deadline_ms>" },
+      { object: "0x6 (clock)" },
+    ],
+  },
+  null,
+  2,
+)}
+          </pre>
+        </details>
       )}
     </div>
   );

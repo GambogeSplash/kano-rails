@@ -2,13 +2,32 @@
 
 import { use, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import {
+  useCurrentAccount,
+  useSuiClient,
+} from "@mysten/dapp-kit";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardLabel } from "@/components/Card";
 import { TierBadge } from "@/components/TierBadge";
+import { WalletButton } from "@/components/WalletButton";
 import { CHIDERA, TIER_CONFIG } from "@/lib/mock-data";
+import { useExecuteTx } from "@/lib/use-execute-tx";
+import {
+  buildAttestTx,
+  buildDripUsdcTx,
+  buildPayTx,
+  fetchPayment,
+  fetchReputation,
+  fetchUsdcCoins,
+  isChainWired,
+  isUsdcFaucetWired,
+  TIER_NAMES,
+  type OnChainPayment,
+  type OnChainReputation,
+} from "@/lib/sui";
 import { formatUSD, truncate } from "@/lib/utils";
 
 type PayMethod = "sui-wallet" | "cross-chain" | "zklogin-card";
-
 type ZkStep = "google" | "provisioning" | "card" | "submitting";
 
 const EASE = [0.22, 1, 0.36, 1] as const;
@@ -25,20 +44,70 @@ export default function PaymentLink({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
+  const account = useCurrentAccount();
+  const client = useSuiClient();
+  const queryClient = useQueryClient();
+  const { mutate: executeTx } = useExecuteTx();
+  const chainWired = isChainWired();
+
+  // Try to load real PaymentObject; fall back to mock display.
+  const paymentQuery = useQuery({
+    queryKey: ["kano-payment", id],
+    queryFn: () =>
+      isChainWired() && id.startsWith("0x")
+        ? fetchPayment(client as never, id)
+        : null,
+    enabled: chainWired && id.startsWith("0x"),
+  });
+
+  // Recipient's reputation object (for attest + pay).
+  const recipientRepQuery = useQuery({
+    queryKey: ["kano-rep-by-owner", paymentQuery.data?.receiver],
+    queryFn: () =>
+      paymentQuery.data
+        ? fetchReputation(client as never, paymentQuery.data.receiver)
+        : null,
+    enabled: !!paymentQuery.data,
+  });
+
+  // Client's own USDC coins.
+  const usdcCoinsQuery = useQuery({
+    queryKey: ["kano-usdc-coins", account?.address],
+    queryFn: () =>
+      account ? fetchUsdcCoins(client as never, account.address) : [],
+    enabled: !!account,
+  });
+
+  const onChainPayment = paymentQuery.data ?? null;
+  const recipientRep = recipientRepQuery.data ?? null;
+  const usdcCoins = usdcCoinsQuery.data ?? [];
+  const usdcBalance = usdcCoins.reduce(
+    (s, c) => s + c.balance,
+    BigInt(0),
+  );
+
+  // Display values: from chain when available, mock otherwise.
+  const amount = onChainPayment?.amountUsdcCents ?? 3000_00;
+  const recipientAddress = onChainPayment?.receiver ?? CHIDERA.address;
+  const tierName = onChainPayment
+    ? TIER_NAMES[onChainPayment.tierAtCreation]
+    : CHIDERA.tier;
+  const tier = TIER_CONFIG[tierName];
+
   const [method, setMethod] = useState<PayMethod | null>(null);
-  const [paid, setPaid] = useState(false);
+  const [paid, setPaid] = useState<{ digest: string } | null>(null);
+  const [payError, setPayError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [attestation, setAttestation] = useState<"none" | "signing" | "given">(
+    "none",
+  );
+
   const [zkStep, setZkStep] = useState<ZkStep>("google");
   const [provisionedAddress, setProvisionedAddress] = useState<string | null>(
     null,
   );
   const [crossChainSource, setCrossChainSource] = useState<string | null>(null);
   const [card, setCard] = useState({ number: "", exp: "", cvc: "" });
-  const [txDigest] = useState(
-    () => `0x${Math.random().toString(16).slice(2, 18)}`,
-  );
-
-  const amount = 3000_00;
-  const tier = TIER_CONFIG[CHIDERA.tier];
 
   useEffect(() => {
     if (zkStep === "provisioning") {
@@ -51,7 +120,14 @@ export default function PaymentLink({
       return () => clearTimeout(t);
     }
     if (zkStep === "submitting") {
-      const t = setTimeout(() => setPaid(true), 1600);
+      // zkLogin path is still mocked
+      const t = setTimeout(
+        () =>
+          setPaid({
+            digest: `0x${Math.random().toString(16).slice(2, 18)}`,
+          }),
+        1600,
+      );
       return () => clearTimeout(t);
     }
   }, [zkStep]);
@@ -62,6 +138,77 @@ export default function PaymentLink({
     setProvisionedAddress(null);
     setCrossChainSource(null);
     setCard({ number: "", exp: "", cvc: "" });
+    setPayError(null);
+    setSubmitting(false);
+  };
+
+  // Real on-chain pay (Sui-wallet path)
+  const payOnChain = (sourceCoinId: string) => {
+    if (!onChainPayment || !recipientRep) return;
+    setSubmitting(true);
+    setPayError(null);
+    const tx = buildPayTx({
+      paymentObjectId: onChainPayment.objectId,
+      receiverReputationObjectId: recipientRep.objectId,
+      sourceUsdcCoinId: sourceCoinId,
+      amountUsdcCents: BigInt(onChainPayment.amountUsdcCents),
+    });
+    executeTx(
+      { transaction: tx },
+      {
+        onSuccess: (result) => {
+          setSubmitting(false);
+          setPaid({ digest: result.digest });
+          queryClient.invalidateQueries({ queryKey: ["kano-payment", id] });
+          queryClient.invalidateQueries({
+            queryKey: ["kano-rep-by-owner"],
+          });
+          queryClient.invalidateQueries({ queryKey: ["kano-usdc-coins"] });
+        },
+        onError: (err) => {
+          setSubmitting(false);
+          setPayError(err.message ?? "Sign failed");
+        },
+      },
+    );
+  };
+
+  // Drip test USDC
+  const dripUsdc = () => {
+    if (!isUsdcFaucetWired()) return;
+    setSubmitting(true);
+    setPayError(null);
+    executeTx(
+      { transaction: buildDripUsdcTx() },
+      {
+        onSuccess: () => {
+          setSubmitting(false);
+          queryClient.invalidateQueries({ queryKey: ["kano-usdc-coins"] });
+        },
+        onError: (err) => {
+          setSubmitting(false);
+          setPayError(err.message ?? "Drip failed");
+        },
+      },
+    );
+  };
+
+  // Real attestation
+  const attest = () => {
+    if (!onChainPayment || !recipientRep) return;
+    setAttestation("signing");
+    executeTx(
+      {
+        transaction: buildAttestTx({
+          paymentObjectId: onChainPayment.objectId,
+          receiverReputationObjectId: recipientRep.objectId,
+        }),
+      },
+      {
+        onSuccess: () => setAttestation("given"),
+        onError: () => setAttestation("none"),
+      },
+    );
   };
 
   return (
@@ -69,14 +216,18 @@ export default function PaymentLink({
       <div className="w-full max-w-md">
         <div className="text-center mb-6">
           <div className="text-xs text-muted font-mono">
-            kano rails · payment object {id}
+            kano rails · payment object {truncate(id, 8, 6)}
           </div>
+          {chainWired && !id.startsWith("0x") && (
+            <div className="mt-1 text-[10px] text-warn font-mono">
+              demo · this is a placeholder id (not a real Sui object)
+            </div>
+          )}
         </div>
 
         <Card className="space-y-5 overflow-hidden">
-          {/* Amount */}
           <div className="text-center">
-            <CardLabel>You're paying</CardLabel>
+            <CardLabel>You&apos;re paying</CardLabel>
             <div className="mt-2 text-4xl font-medium tabular-nums">
               {formatUSD(amount)}
             </div>
@@ -85,7 +236,6 @@ export default function PaymentLink({
             </div>
           </div>
 
-          {/* Sponsored gas badge — promoted to top */}
           {tier.clientGasSponsored && !paid && (
             <div className="flex items-center justify-center gap-2 text-xs font-mono py-1.5 rounded-md bg-signal-dim border border-signal/30 text-signal">
               <svg className="size-3" viewBox="0 0 24 24" fill="currentColor">
@@ -95,42 +245,40 @@ export default function PaymentLink({
             </div>
           )}
 
-          {/* Recipient + reputation */}
-          <div className="border border-border rounded-lg p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-sm font-medium">
-                  {CHIDERA.displayName}
-                </div>
-                <div className="text-xs text-muted font-mono">
-                  {truncate(CHIDERA.address)}
-                </div>
-              </div>
-              <TierBadge tier={CHIDERA.tier} />
-            </div>
-            <div className="grid grid-cols-3 gap-2 pt-3 border-t border-border text-center text-xs">
-              <Stat label="payments" value={CHIDERA.completedPayments} />
-              <Stat label="attestations" value={CHIDERA.attestationCount} />
-              <Stat
-                label="wallet age"
-                value={`${CHIDERA.walletAgeDays}d`}
-              />
-            </div>
-          </div>
+          <RecipientCard
+            name={CHIDERA.displayName}
+            address={recipientAddress}
+            tier={tierName}
+            rep={recipientRep}
+          />
 
-          {/* Body — animated state machine */}
           <AnimatePresence mode="wait">
             {paid ? (
               <SuccessPanel
                 key="paid"
-                txDigest={txDigest}
-                onReset={reset}
+                digest={paid.digest}
+                attestation={attestation}
+                canAttest={
+                  !!onChainPayment &&
+                  !!recipientRep &&
+                  onChainPayment.sender === account?.address
+                }
+                onAttest={attest}
+                onReset={() => {
+                  setPaid(null);
+                  reset();
+                }}
               />
             ) : !method ? (
               <motion.div key="picker" {...FADE_UP} className="space-y-2">
                 <PayButton
                   label="Pay with Sui wallet"
-                  sub="You already have one connected"
+                  sub={
+                    onChainPayment
+                      ? "Real on-chain payment · signs in your wallet"
+                      : "You already have one connected"
+                  }
+                  highlight
                   onClick={() => setMethod("sui-wallet")}
                 />
                 <PayButton
@@ -141,7 +289,6 @@ export default function PaymentLink({
                 <PayButton
                   label="Pay with card"
                   sub="Sign in with Google · no wallet needed"
-                  highlight
                   onClick={() => setMethod("zklogin-card")}
                 />
               </motion.div>
@@ -149,7 +296,19 @@ export default function PaymentLink({
               <SuiWalletPanel
                 key="sui"
                 amount={amount}
-                onPay={() => setPaid(true)}
+                onChainReady={!!onChainPayment && !!recipientRep}
+                account={account?.address ?? null}
+                usdcBalance={usdcBalance}
+                usdcCoins={usdcCoins}
+                submitting={submitting}
+                error={payError}
+                onPayOnChain={payOnChain}
+                onPayMock={() =>
+                  setPaid({
+                    digest: `0x${Math.random().toString(16).slice(2, 18)}`,
+                  })
+                }
+                onDripUsdc={isUsdcFaucetWired() ? dripUsdc : undefined}
                 onBack={reset}
               />
             ) : method === "cross-chain" ? (
@@ -158,7 +317,11 @@ export default function PaymentLink({
                 source={crossChainSource}
                 onPickSource={setCrossChainSource}
                 amount={amount}
-                onPay={() => setPaid(true)}
+                onPay={() =>
+                  setPaid({
+                    digest: `0x${Math.random().toString(16).slice(2, 18)}`,
+                  })
+                }
                 onBack={reset}
               />
             ) : (
@@ -188,6 +351,42 @@ export default function PaymentLink({
 // ============================================================================
 // Sub-components
 // ============================================================================
+
+function RecipientCard({
+  name,
+  address,
+  tier,
+  rep,
+}: {
+  name: string;
+  address: string;
+  tier: "Bronze" | "Silver" | "Gold";
+  rep: OnChainReputation | null;
+}) {
+  const payments = rep?.completedPayments ?? CHIDERA.completedPayments;
+  const attestations =
+    rep?.nativeAttestationCount ?? CHIDERA.attestationCount;
+  const ageDays = rep?.walletAgeDays ?? CHIDERA.walletAgeDays;
+
+  return (
+    <div className="border border-border rounded-lg p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="text-sm font-medium">{name}</div>
+          <div className="text-xs text-muted font-mono">
+            {truncate(address)}
+          </div>
+        </div>
+        <TierBadge tier={tier} />
+      </div>
+      <div className="grid grid-cols-3 gap-2 pt-3 border-t border-border text-center text-xs">
+        <Stat label="payments" value={payments} />
+        <Stat label="attestations" value={attestations} />
+        <Stat label="wallet age" value={`${ageDays}d`} />
+      </div>
+    </div>
+  );
+}
 
 function Stat({ label, value }: { label: string; value: React.ReactNode }) {
   return (
@@ -237,13 +436,53 @@ function PayButton({
 
 function SuiWalletPanel({
   amount,
-  onPay,
+  onChainReady,
+  account,
+  usdcBalance,
+  usdcCoins,
+  submitting,
+  error,
+  onPayOnChain,
+  onPayMock,
+  onDripUsdc,
   onBack,
 }: {
   amount: number;
-  onPay: () => void;
+  onChainReady: boolean;
+  account: string | null;
+  usdcBalance: bigint;
+  usdcCoins: Array<{ coinObjectId: string; balance: bigint }>;
+  submitting: boolean;
+  error: string | null;
+  onPayOnChain: (sourceCoinId: string) => void;
+  onPayMock: () => void;
+  onDripUsdc?: () => void;
   onBack: () => void;
 }) {
+  if (!account) {
+    return (
+      <motion.div {...FADE_UP} className="space-y-3 text-center">
+        <div className="text-sm text-muted">
+          Connect a Sui wallet to pay on-chain.
+        </div>
+        <div className="flex justify-center">
+          <WalletButton />
+        </div>
+        <button
+          onClick={onPayMock}
+          className="w-full text-xs text-muted hover:text-foreground"
+        >
+          or run the demo (no wallet)
+        </button>
+        <BackButton onClick={onBack} />
+      </motion.div>
+    );
+  }
+
+  const requiredMist = BigInt(amount * 10000); // amount is cents, USDC has 6 decimals
+  const hasEnoughUsdc = usdcBalance >= requiredMist;
+  const sourceCoin = usdcCoins.find((c) => c.balance >= requiredMist);
+
   return (
     <motion.div {...FADE_UP} className="space-y-3">
       <div className="border border-border rounded-lg p-4 flex items-center gap-3">
@@ -253,15 +492,50 @@ function SuiWalletPanel({
           </svg>
         </div>
         <div className="flex-1">
-          <div className="text-sm font-medium">Sui Wallet detected</div>
+          <div className="text-sm font-medium">Connected</div>
           <div className="text-xs text-muted font-mono">
-            0x9a4f…b21c · 487 USDC available
+            {truncate(account)} ·{" "}
+            {(Number(usdcBalance) / 1_000_000).toFixed(2)} USDC available
           </div>
         </div>
       </div>
-      <PrimaryButton onClick={onPay}>
-        Sign & pay {formatUSD(amount)}
-      </PrimaryButton>
+
+      {!onChainReady ? (
+        <>
+          <div className="text-xs text-muted text-center">
+            This payment isn&apos;t a real on-chain object — running demo mode.
+          </div>
+          <PrimaryButton onClick={onPayMock}>
+            Pay {formatUSD(amount)}
+          </PrimaryButton>
+        </>
+      ) : !hasEnoughUsdc ? (
+        <>
+          <div className="text-xs text-warn text-center">
+            You need {(Number(requiredMist) / 1_000_000).toFixed(2)} USDC.
+          </div>
+          {onDripUsdc && (
+            <PrimaryButton onClick={onDripUsdc}>
+              {submitting
+                ? "Minting…"
+                : "Get 1,000 test USDC (free)"}
+            </PrimaryButton>
+          )}
+        </>
+      ) : (
+        <PrimaryButton onClick={() => sourceCoin && onPayOnChain(sourceCoin.coinObjectId)}>
+          {submitting
+            ? "Sign in your wallet…"
+            : `Sign & pay ${formatUSD(amount)}`}
+        </PrimaryButton>
+      )}
+
+      {error && (
+        <div className="text-xs text-danger font-mono break-all p-2 rounded-md bg-danger/5 border border-danger/30">
+          {error}
+        </div>
+      )}
+
       <BackButton onClick={onBack} />
     </motion.div>
   );
@@ -364,7 +638,6 @@ function ZkLoginPanel({
 }) {
   return (
     <motion.div {...FADE_UP} className="space-y-3">
-      {/* Step indicator */}
       <div className="flex items-center justify-center gap-2 text-[10px] font-mono uppercase tracking-wider">
         <StepDot active={step === "google"} done={step !== "google"}>
           1 sign in
@@ -410,7 +683,7 @@ function ZkLoginPanel({
               Continue with Google
             </button>
             <div className="text-[11px] text-muted text-center leading-relaxed">
-              We'll provision a Sui address from your Google sign-in via{" "}
+              We&apos;ll provision a Sui address from your Google sign-in via{" "}
               <span className="font-mono">zkLogin</span>. No wallet to install.
               No seed phrase.
             </div>
@@ -568,17 +841,21 @@ function StepDot({
 
 function Connector({ done }: { done: boolean }) {
   return (
-    <span
-      className={`h-px w-4 ${done ? "bg-success" : "bg-border"}`}
-    />
+    <span className={`h-px w-4 ${done ? "bg-success" : "bg-border"}`} />
   );
 }
 
 function SuccessPanel({
-  txDigest,
+  digest,
+  attestation,
+  canAttest,
+  onAttest,
   onReset,
 }: {
-  txDigest: string;
+  digest: string;
+  attestation: "none" | "signing" | "given";
+  canAttest: boolean;
+  onAttest: () => void;
   onReset: () => void;
 }) {
   return (
@@ -592,11 +869,7 @@ function SuccessPanel({
       <motion.div
         initial={{ scale: 0.5, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}
-        transition={{
-          duration: 0.55,
-          ease: EASE,
-          delay: 0.05,
-        }}
+        transition={{ duration: 0.55, ease: EASE, delay: 0.05 }}
         className="size-14 mx-auto rounded-full bg-success/10 border border-success/40 flex items-center justify-center text-success"
       >
         <svg className="size-7" viewBox="0 0 24 24" fill="none">
@@ -614,23 +887,42 @@ function SuccessPanel({
       </motion.div>
       <div className="font-medium text-lg">Payment sent</div>
       <div className="space-y-1.5 text-xs font-mono text-muted">
-        <div>Settled in 4.2s</div>
         <a
-          href={`https://suiscan.xyz/testnet/tx/${txDigest}`}
+          href={`https://suiscan.xyz/testnet/tx/${digest}`}
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center gap-1 text-signal hover:underline"
         >
-          {txDigest.slice(0, 10)}…{txDigest.slice(-6)}
-          <svg className="size-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          {digest.slice(0, 10)}…{digest.slice(-6)}
+          <svg
+            className="size-3"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+          >
             <path d="M7 17L17 7M9 7h8v8" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </a>
       </div>
       <div className="pt-2">
-        <button className="w-full text-xs text-signal hover:bg-signal-dim transition rounded-md py-2.5 border border-signal/30">
-          Confirm this was a legitimate contract payment
-        </button>
+        {canAttest && attestation === "given" ? (
+          <div className="w-full text-xs text-success font-mono py-2.5 border border-success/30 rounded-md bg-success/5">
+            ✓ attestation recorded on-chain
+          </div>
+        ) : (
+          <button
+            onClick={canAttest ? onAttest : undefined}
+            disabled={!canAttest || attestation === "signing"}
+            className="w-full text-xs text-signal hover:bg-signal-dim transition rounded-md py-2.5 border border-signal/30 disabled:opacity-50"
+          >
+            {attestation === "signing"
+              ? "signing attestation…"
+              : canAttest
+                ? "Confirm this was a legitimate contract payment"
+                : "Attestations are on-chain only — connect the same wallet that paid"}
+          </button>
+        )}
         <div className="mt-1.5 text-[10px] text-muted">
           One click. Helps {CHIDERA.displayName.split(" ")[0]} reach Gold tier.
         </div>

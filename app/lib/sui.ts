@@ -7,13 +7,19 @@ export const KANO_PACKAGE_ID =
   process.env.NEXT_PUBLIC_KANO_PACKAGE_ID ?? "";
 
 export const USDC_TYPE =
-  process.env.NEXT_PUBLIC_USDC_TYPE ??
-  // Sui testnet USDC type (placeholder — replace with real testnet USDC after publish).
-  "0x0::usdc::USDC";
+  process.env.NEXT_PUBLIC_USDC_TYPE ?? "0x0::usdc::USDC";
+
+export const TEST_USDC_PACKAGE_ID =
+  process.env.NEXT_PUBLIC_TEST_USDC_PACKAGE_ID ?? "";
+
+export const TEST_USDC_FAUCET =
+  process.env.NEXT_PUBLIC_TEST_USDC_FAUCET ?? "";
 
 export const SUI_CLOCK = "0x6";
 
 export const isChainWired = () => KANO_PACKAGE_ID.length > 0;
+export const isUsdcFaucetWired = () =>
+  TEST_USDC_PACKAGE_ID.length > 0 && TEST_USDC_FAUCET.length > 0;
 
 // === Types ===
 
@@ -36,12 +42,20 @@ export interface OnChainReputation {
   tier: OnChainTier;
 }
 
+export interface OnChainPayment {
+  objectId: string;
+  receiver: string;
+  sender: string | null;
+  amountUsdcCents: number;
+  tierAtCreation: OnChainTier;
+  feeBps: number;
+  gasSponsored: boolean;
+  status: "pending" | "settled" | "disputed" | "expired" | "cancelled";
+  attestationGiven: boolean;
+}
+
 // === Reads ===
 
-/**
- * Fetch the freelancer's ReputationObject. Returns null if the user hasn't
- * minted one yet, or if the chain integration isn't wired up.
- */
 export async function fetchReputation(
   client: SuiJsonRpcClient,
   owner: string,
@@ -79,11 +93,69 @@ export async function fetchReputation(
   };
 }
 
-// === Writes (Programmable Transaction builders) ===
+export async function fetchPayment(
+  client: SuiJsonRpcClient,
+  paymentObjectId: string,
+): Promise<OnChainPayment | null> {
+  if (!isChainWired()) return null;
+
+  const obj = await client.getObject({
+    id: paymentObjectId,
+    options: { showContent: true },
+  });
+
+  if (
+    !obj.data?.content ||
+    obj.data.content.dataType !== "moveObject" ||
+    !obj.data.content.type.startsWith(`${KANO_PACKAGE_ID}::payment::PaymentObject`)
+  ) {
+    return null;
+  }
+
+  const fields = (obj.data.content as { fields: Record<string, unknown> })
+    .fields;
+  const statusNum = Number(fields.status ?? 0);
+  const statusMap: OnChainPayment["status"][] = [
+    "pending",
+    "settled",
+    "disputed",
+    "expired",
+    "cancelled",
+  ];
+
+  return {
+    objectId: obj.data.objectId,
+    receiver: String(fields.receiver ?? ""),
+    sender:
+      fields.sender && String(fields.sender) !== "0x0"
+        ? String(fields.sender)
+        : null,
+    amountUsdcCents: Number(fields.amount_usdc_cents ?? 0),
+    tierAtCreation: Number(fields.tier_at_creation ?? 0) as OnChainTier,
+    feeBps: Number(fields.fee_bps ?? 0),
+    gasSponsored: Boolean(fields.gas_sponsored),
+    status: statusMap[statusNum] ?? "pending",
+    attestationGiven: Boolean(fields.attestation_given),
+  };
+}
 
 /**
- * Build a tx that creates a new ReputationObject for the sender.
+ * Return USDC coin object IDs owned by `owner` with their balances (mist).
  */
+export async function fetchUsdcCoins(
+  client: SuiJsonRpcClient,
+  owner: string,
+): Promise<Array<{ coinObjectId: string; balance: bigint }>> {
+  if (!isChainWired()) return [];
+  const coins = await client.getCoins({ owner, coinType: USDC_TYPE });
+  return coins.data.map((c) => ({
+    coinObjectId: c.coinObjectId,
+    balance: BigInt(c.balance),
+  }));
+}
+
+// === Writes (Programmable Transaction builders) ===
+
 export function buildMintReputationTx(): Transaction {
   const tx = new Transaction();
   const rep = tx.moveCall({
@@ -97,10 +169,6 @@ export function buildMintReputationTx(): Transaction {
   return tx;
 }
 
-/**
- * Build a tx that creates a new PaymentObject. Tier snapshot is locked
- * server-side via the freelancer's ReputationObject reference.
- */
 export function buildCreatePaymentTx(opts: {
   reputationObjectId: string;
   amountUsdcCents: bigint;
@@ -121,33 +189,35 @@ export function buildCreatePaymentTx(opts: {
 }
 
 /**
- * Build a tx that pays a PaymentObject from a USDC Coin owned by sender.
+ * Build a Pay tx that splits the exact required amount from a USDC coin
+ * the client owns. The split coin is passed to payment::pay.
  */
 export function buildPayTx(opts: {
   paymentObjectId: string;
-  reputationObjectId: string;
-  usdcCoinId: string;
+  receiverReputationObjectId: string;
+  sourceUsdcCoinId: string;
+  amountUsdcCents: bigint;
 }): Transaction {
   const tx = new Transaction();
+  const [coinToSend] = tx.splitCoins(tx.object(opts.sourceUsdcCoinId), [
+    tx.pure.u64(opts.amountUsdcCents),
+  ]);
   tx.moveCall({
     target: `${KANO_PACKAGE_ID}::payment::pay`,
     typeArguments: [USDC_TYPE],
     arguments: [
       tx.object(opts.paymentObjectId),
-      tx.object(opts.usdcCoinId),
-      tx.object(opts.reputationObjectId),
+      coinToSend,
+      tx.object(opts.receiverReputationObjectId),
       tx.object(SUI_CLOCK),
     ],
   });
   return tx;
 }
 
-/**
- * Build a tx that records a native attestation from the client side.
- */
 export function buildAttestTx(opts: {
   paymentObjectId: string;
-  reputationObjectId: string;
+  receiverReputationObjectId: string;
 }): Transaction {
   const tx = new Transaction();
   tx.moveCall({
@@ -155,9 +225,41 @@ export function buildAttestTx(opts: {
     typeArguments: [USDC_TYPE],
     arguments: [
       tx.object(opts.paymentObjectId),
-      tx.object(opts.reputationObjectId),
+      tx.object(opts.receiverReputationObjectId),
       tx.object(SUI_CLOCK),
     ],
   });
   return tx;
+}
+
+/**
+ * Build a tx that drips 1,000 test USDC to the sender from the public faucet.
+ */
+export function buildDripUsdcTx(): Transaction {
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${TEST_USDC_PACKAGE_ID}::usdc::drip`,
+    arguments: [tx.object(TEST_USDC_FAUCET)],
+  });
+  return tx;
+}
+
+// === Helpers ===
+
+/**
+ * Find the PaymentObject's ID in a tx response's effects.
+ */
+export function extractCreatedPaymentObjectId(
+  result: { effects?: { created?: Array<{ reference?: { objectId?: string }; owner?: unknown }> } } | undefined,
+): string | null {
+  const created = result?.effects?.created;
+  if (!created) return null;
+  // PaymentObject is shared, so look for an entry with owner type 'Shared'.
+  for (const c of created) {
+    if (typeof c.owner === "object" && c.owner !== null && "Shared" in c.owner) {
+      return c.reference?.objectId ?? null;
+    }
+  }
+  // Fallback: first created object.
+  return created[0]?.reference?.objectId ?? null;
 }
