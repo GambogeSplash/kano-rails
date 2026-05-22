@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
+import { WalletButton } from "@/components/WalletButton";
 
 const APP_NAV = [
   { href: "/app", label: "Dashboard" },
@@ -72,28 +73,31 @@ export function Shell({ children }: { children: React.ReactNode }) {
             <span>kano rails</span>
             <span className="text-muted">/ testnet</span>
           </Link>
-          <nav className="flex items-center gap-1 text-sm">
-            {APP_NAV.map((item) => {
-              const active =
-                item.href === "/app"
-                  ? pathname === "/app"
-                  : pathname.startsWith(item.href);
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={cn(
-                    "px-3 py-1.5 rounded-md transition-colors",
-                    active
-                      ? "bg-surface text-foreground"
-                      : "text-muted hover:text-foreground hover:bg-surface/50"
-                  )}
-                >
-                  {item.label}
-                </Link>
-              );
-            })}
-          </nav>
+          <div className="flex items-center gap-4">
+            <nav className="hidden md:flex items-center gap-1 text-sm">
+              {APP_NAV.map((item) => {
+                const active =
+                  item.href === "/app"
+                    ? pathname === "/app"
+                    : pathname.startsWith(item.href);
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    className={cn(
+                      "px-3 py-1.5 rounded-md transition-colors",
+                      active
+                        ? "bg-surface text-foreground"
+                        : "text-muted hover:text-foreground hover:bg-surface/50"
+                    )}
+                  >
+                    {item.label}
+                  </Link>
+                );
+              })}
+            </nav>
+            <WalletButton />
+          </div>
         </div>
       </header>
       <main className="flex-1 max-w-6xl w-full mx-auto px-6 py-10">
